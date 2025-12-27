@@ -1,19 +1,37 @@
-from collections.abc import Mapping, Sequence
+"""
+Wrapper for the builtin json module that ensures compliance with the JSON spec.
+
+REST framework should always import this wrapper module in order to maintain
+spec-compliant encoding/decoding. Support for non-standard features should be
+handled by users at the renderer and parser layer.
+"""
+import functools
+import json  # noqa
 
 
-def normalize_json(obj):
-    """Recursively normalize an object into JSON-compatible types."""
-    match obj:
-        case Mapping():
-            return {normalize_json(k): normalize_json(v) for k, v in obj.items()}
-        case bytes():
-            try:
-                return obj.decode("utf-8")
-            except UnicodeDecodeError:
-                raise ValueError(f"Unsupported value: {type(obj)}")
-        case str() | int() | float() | bool() | None:
-            return obj
-        case Sequence():  # str and bytes were already handled.
-            return [normalize_json(v) for v in obj]
-        case _:  # Other types can't be serialized to JSON
-            raise TypeError(f"Unsupported type: {type(obj)}")
+def strict_constant(o):
+    raise ValueError('Out of range float values are not JSON compliant: ' + repr(o))
+
+
+@functools.wraps(json.dump)
+def dump(*args, **kwargs):
+    kwargs.setdefault('allow_nan', False)
+    return json.dump(*args, **kwargs)
+
+
+@functools.wraps(json.dumps)
+def dumps(*args, **kwargs):
+    kwargs.setdefault('allow_nan', False)
+    return json.dumps(*args, **kwargs)
+
+
+@functools.wraps(json.load)
+def load(*args, **kwargs):
+    kwargs.setdefault('parse_constant', strict_constant)
+    return json.load(*args, **kwargs)
+
+
+@functools.wraps(json.loads)
+def loads(*args, **kwargs):
+    kwargs.setdefault('parse_constant', strict_constant)
+    return json.loads(*args, **kwargs)
