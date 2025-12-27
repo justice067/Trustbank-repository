@@ -1,21 +1,50 @@
-"""
-Login and logout views for the browsable API.
+from django.contrib.admindocs import views
+from django.urls import path, re_path
 
-Add these to your root URLconf if you're using the browsable API and
-your API requires authentication:
-
-    urlpatterns = [
-        ...
-        path('auth/', include('rest_framework.urls'))
-    ]
-
-You should make sure your authentication settings include `SessionAuthentication`.
-"""
-from django.contrib.auth import views
-from django.urls import path
-
-app_name = 'rest_framework'
 urlpatterns = [
-    path('login/', views.LoginView.as_view(template_name='rest_framework/login.html'), name='login'),
-    path('logout/', views.LogoutView.as_view(), name='logout'),
+    path(
+        "",
+        views.BaseAdminDocsView.as_view(template_name="admin_doc/index.html"),
+        name="django-admindocs-docroot",
+    ),
+    path(
+        "bookmarklets/",
+        views.BookmarkletsView.as_view(),
+        name="django-admindocs-bookmarklets",
+    ),
+    path(
+        "tags/",
+        views.TemplateTagIndexView.as_view(),
+        name="django-admindocs-tags",
+    ),
+    path(
+        "filters/",
+        views.TemplateFilterIndexView.as_view(),
+        name="django-admindocs-filters",
+    ),
+    path(
+        "views/",
+        views.ViewIndexView.as_view(),
+        name="django-admindocs-views-index",
+    ),
+    path(
+        "views/<view>/",
+        views.ViewDetailView.as_view(),
+        name="django-admindocs-views-detail",
+    ),
+    path(
+        "models/",
+        views.ModelIndexView.as_view(),
+        name="django-admindocs-models-index",
+    ),
+    re_path(
+        r"^models/(?P<app_label>[^.]+)\.(?P<model_name>[^/]+)/$",
+        views.ModelDetailView.as_view(),
+        name="django-admindocs-models-detail",
+    ),
+    path(
+        "templates/<path:template>/",
+        views.TemplateDetailView.as_view(),
+        name="django-admindocs-templates",
+    ),
 ]

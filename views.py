@@ -1,527 +1,523 @@
-"""
-Provides an APIView class that is the base of all views in REST framework.
-"""
-from django import VERSION as DJANGO_VERSION
-from django.conf import settings
-from django.core.exceptions import PermissionDenied
-from django.db import connections, models
+import inspect
+from importlib import import_module
+from inspect import cleandoc
+from pathlib import Path
+
+from django.apps import apps
+from django.contrib import admin
+from django.contrib.admin.views.decorators import staff_member_required
+from django.contrib.admindocs import utils
+from django.contrib.admindocs.utils import (
+    remove_non_capturing_groups,
+    replace_metacharacters,
+    replace_named_groups,
+    replace_unnamed_groups,
+)
+from django.contrib.auth import get_permission_codename
+from django.core.exceptions import (
+    ImproperlyConfigured,
+    PermissionDenied,
+    ViewDoesNotExist,
+)
+from django.db import models
 from django.http import Http404
-from django.http.response import HttpResponseBase
-from django.utils.cache import cc_delim_re, patch_vary_headers
-from django.utils.encoding import smart_str
-from django.views.decorators.csrf import csrf_exempt
-from django.views.generic import View
+from django.template.engine import Engine
+from django.urls import get_mod_func, get_resolver, get_urlconf
+from django.utils._os import safe_join
+from django.utils.decorators import method_decorator
+from django.utils.functional import cached_property
+from django.utils.inspect import (
+    func_accepts_kwargs,
+    func_accepts_var_args,
+    get_func_full_args,
+    method_has_no_args,
+)
+from django.utils.translation import gettext as _
+from django.views.generic import TemplateView
 
-from rest_framework import exceptions, status
-from rest_framework.request import Request
-from rest_framework.response import Response
-from rest_framework.schemas import DefaultSchema
-from rest_framework.settings import api_settings
-from rest_framework.utils import formatting
+from .utils import get_view_name, strip_p_tags
+
+# Exclude methods starting with these strings from documentation
+MODEL_METHODS_EXCLUDE = ("_", "add_", "delete", "save", "set_")
 
 
-def get_view_name(view):
+class BaseAdminDocsView(TemplateView):
     """
-    Given a view instance, return a textual name to represent the view.
-    This name is used in the browsable API, and in OPTIONS responses.
-
-    This function is the default for the `VIEW_NAME_FUNCTION` setting.
+    Base view for admindocs views.
     """
-    # Name may be set by some Views, such as a ViewSet.
-    name = getattr(view, 'name', None)
-    if name is not None:
-        return name
 
-    name = view.__class__.__name__
-    name = formatting.remove_trailing_string(name, 'View')
-    name = formatting.remove_trailing_string(name, 'ViewSet')
-    name = formatting.camelcase_to_spaces(name)
-
-    # Suffix may be set by some Views, such as a ViewSet.
-    suffix = getattr(view, 'suffix', None)
-    if suffix:
-        name += ' ' + suffix
-
-    return name
-
-
-def get_view_description(view, html=False):
-    """
-    Given a view instance, return a textual description to represent the view.
-    This name is used in the browsable API, and in OPTIONS responses.
-
-    This function is the default for the `VIEW_DESCRIPTION_FUNCTION` setting.
-    """
-    # Description may be set by some Views, such as a ViewSet.
-    description = getattr(view, 'description', None)
-    if description is None:
-        description = view.__class__.__doc__ or ''
-
-    description = formatting.dedent(smart_str(description))
-    if html:
-        return formatting.markup_description(description)
-    return description
-
-
-def set_rollback():
-    for db in connections.all():
-        if db.settings_dict['ATOMIC_REQUESTS'] and db.in_atomic_block:
-            db.set_rollback(True)
-
-
-def exception_handler(exc, context):
-    """
-    Returns the response that should be used for any given exception.
-
-    By default we handle the REST framework `APIException`, and also
-    Django's built-in `Http404` and `PermissionDenied` exceptions.
-
-    Any unhandled exceptions may return `None`, which will cause a 500 error
-    to be raised.
-    """
-    if isinstance(exc, Http404):
-        exc = exceptions.NotFound(*(exc.args))
-    elif isinstance(exc, PermissionDenied):
-        exc = exceptions.PermissionDenied(*(exc.args))
-
-    if isinstance(exc, exceptions.APIException):
-        headers = {}
-        if getattr(exc, 'auth_header', None):
-            headers['WWW-Authenticate'] = exc.auth_header
-        if getattr(exc, 'wait', None):
-            headers['Retry-After'] = '%d' % exc.wait
-
-        if isinstance(exc.detail, (list, dict)):
-            data = exc.detail
-        else:
-            data = {'detail': exc.detail}
-
-        set_rollback()
-        return Response(data, status=exc.status_code, headers=headers)
-
-    return None
-
-
-class APIView(View):
-
-    # The following policies may be set at either globally, or per-view.
-    renderer_classes = api_settings.DEFAULT_RENDERER_CLASSES
-    parser_classes = api_settings.DEFAULT_PARSER_CLASSES
-    authentication_classes = api_settings.DEFAULT_AUTHENTICATION_CLASSES
-    throttle_classes = api_settings.DEFAULT_THROTTLE_CLASSES
-    permission_classes = api_settings.DEFAULT_PERMISSION_CLASSES
-    content_negotiation_class = api_settings.DEFAULT_CONTENT_NEGOTIATION_CLASS
-    metadata_class = api_settings.DEFAULT_METADATA_CLASS
-    versioning_class = api_settings.DEFAULT_VERSIONING_CLASS
-
-    # Allow dependency injection of other settings to make testing easier.
-    settings = api_settings
-
-    schema = DefaultSchema()
-
-    @classmethod
-    def as_view(cls, **initkwargs):
-        """
-        Store the original class on the view function.
-
-        This allows us to discover information about the view when we do URL
-        reverse lookups.  Used for breadcrumb generation.
-        """
-        if isinstance(getattr(cls, 'queryset', None), models.query.QuerySet):
-            def force_evaluation():
-                raise RuntimeError(
-                    'Do not evaluate the `.queryset` attribute directly, '
-                    'as the result will be cached and reused between requests. '
-                    'Use `.all()` or call `.get_queryset()` instead.'
-                )
-            cls.queryset._fetch_all = force_evaluation
-
-        view = super().as_view(**initkwargs)
-        view.cls = cls
-        view.initkwargs = initkwargs
-
-        # Exempt all DRF views from Django's LoginRequiredMiddleware. Users should set
-        # DEFAULT_PERMISSION_CLASSES to 'rest_framework.permissions.IsAuthenticated' instead
-        if DJANGO_VERSION >= (5, 1):
-            view.login_required = False
-
-        # Note: session based authentication is explicitly CSRF validated,
-        # all other authentication is CSRF exempt.
-        return csrf_exempt(view)
-
-    @property
-    def allowed_methods(self):
-        """
-        Wrap Django's private `_allowed_methods` interface in a public property.
-        """
-        return self._allowed_methods()
-
-    @property
-    def default_response_headers(self):
-        headers = {
-            'Allow': ', '.join(self.allowed_methods),
-        }
-        if len(self.renderer_classes) > 1:
-            headers['Vary'] = 'Accept'
-        return headers
-
-    def http_method_not_allowed(self, request, *args, **kwargs):
-        """
-        If `request.method` does not correspond to a handler method,
-        determine what kind of exception to raise.
-        """
-        raise exceptions.MethodNotAllowed(request.method)
-
-    def permission_denied(self, request, message=None, code=None):
-        """
-        If request is not permitted, determine what kind of exception to raise.
-        """
-        if request.authenticators and not request.successful_authenticator:
-            raise exceptions.NotAuthenticated()
-        raise exceptions.PermissionDenied(detail=message, code=code)
-
-    def throttled(self, request, wait):
-        """
-        If request is throttled, determine what kind of exception to raise.
-        """
-        raise exceptions.Throttled(wait)
-
-    def get_authenticate_header(self, request):
-        """
-        If a request is unauthenticated, determine the WWW-Authenticate
-        header to use for 401 responses, if any.
-        """
-        authenticators = self.get_authenticators()
-        if authenticators:
-            return authenticators[0].authenticate_header(request)
-
-    def get_parser_context(self, http_request):
-        """
-        Returns a dict that is passed through to Parser.parse(),
-        as the `parser_context` keyword argument.
-        """
-        # Note: Additionally `request` and `encoding` will also be added
-        #       to the context by the Request object.
-        return {
-            'view': self,
-            'args': getattr(self, 'args', ()),
-            'kwargs': getattr(self, 'kwargs', {})
-        }
-
-    def get_renderer_context(self):
-        """
-        Returns a dict that is passed through to Renderer.render(),
-        as the `renderer_context` keyword argument.
-        """
-        # Note: Additionally 'response' will also be added to the context,
-        #       by the Response object.
-        return {
-            'view': self,
-            'args': getattr(self, 'args', ()),
-            'kwargs': getattr(self, 'kwargs', {}),
-            'request': getattr(self, 'request', None)
-        }
-
-    def get_exception_handler_context(self):
-        """
-        Returns a dict that is passed through to EXCEPTION_HANDLER,
-        as the `context` argument.
-        """
-        return {
-            'view': self,
-            'args': getattr(self, 'args', ()),
-            'kwargs': getattr(self, 'kwargs', {}),
-            'request': getattr(self, 'request', None)
-        }
-
-    def get_view_name(self):
-        """
-        Return the view name, as used in OPTIONS responses and in the
-        browsable API.
-        """
-        func = self.settings.VIEW_NAME_FUNCTION
-        return func(self)
-
-    def get_view_description(self, html=False):
-        """
-        Return some descriptive text for the view, as used in OPTIONS responses
-        and in the browsable API.
-        """
-        func = self.settings.VIEW_DESCRIPTION_FUNCTION
-        return func(self, html)
-
-    # API policy instantiation methods
-
-    def get_format_suffix(self, **kwargs):
-        """
-        Determine if the request includes a '.json' style format suffix
-        """
-        if self.settings.FORMAT_SUFFIX_KWARG:
-            return kwargs.get(self.settings.FORMAT_SUFFIX_KWARG)
-
-    def get_renderers(self):
-        """
-        Instantiates and returns the list of renderers that this view can use.
-        """
-        return [renderer() for renderer in self.renderer_classes]
-
-    def get_parsers(self):
-        """
-        Instantiates and returns the list of parsers that this view can use.
-        """
-        return [parser() for parser in self.parser_classes]
-
-    def get_authenticators(self):
-        """
-        Instantiates and returns the list of authenticators that this view can use.
-        """
-        return [auth() for auth in self.authentication_classes]
-
-    def get_permissions(self):
-        """
-        Instantiates and returns the list of permissions that this view requires.
-        """
-        return [permission() for permission in self.permission_classes]
-
-    def get_throttles(self):
-        """
-        Instantiates and returns the list of throttles that this view uses.
-        """
-        return [throttle() for throttle in self.throttle_classes]
-
-    def get_content_negotiator(self):
-        """
-        Instantiate and return the content negotiation class to use.
-        """
-        if not getattr(self, '_negotiator', None):
-            self._negotiator = self.content_negotiation_class()
-        return self._negotiator
-
-    def get_exception_handler(self):
-        """
-        Returns the exception handler that this view uses.
-        """
-        return self.settings.EXCEPTION_HANDLER
-
-    # API policy implementation methods
-
-    def perform_content_negotiation(self, request, force=False):
-        """
-        Determine which renderer and media type to use render the response.
-        """
-        renderers = self.get_renderers()
-        conneg = self.get_content_negotiator()
-
-        try:
-            return conneg.select_renderer(request, renderers, self.format_kwarg)
-        except Exception:
-            if force:
-                return (renderers[0], renderers[0].media_type)
-            raise
-
-    def perform_authentication(self, request):
-        """
-        Perform authentication on the incoming request.
-
-        Note that if you override this and simply 'pass', then authentication
-        will instead be performed lazily, the first time either
-        `request.user` or `request.auth` is accessed.
-        """
-        request.user
-
-    def check_permissions(self, request):
-        """
-        Check if the request should be permitted.
-        Raises an appropriate exception if the request is not permitted.
-        """
-        for permission in self.get_permissions():
-            if not permission.has_permission(request, self):
-                self.permission_denied(
-                    request,
-                    message=getattr(permission, 'message', None),
-                    code=getattr(permission, 'code', None)
-                )
-
-    def check_object_permissions(self, request, obj):
-        """
-        Check if the request should be permitted for a given object.
-        Raises an appropriate exception if the request is not permitted.
-        """
-        for permission in self.get_permissions():
-            if not permission.has_object_permission(request, self, obj):
-                self.permission_denied(
-                    request,
-                    message=getattr(permission, 'message', None),
-                    code=getattr(permission, 'code', None)
-                )
-
-    def check_throttles(self, request):
-        """
-        Check if request should be throttled.
-        Raises an appropriate exception if the request is throttled.
-        """
-        throttle_durations = []
-        for throttle in self.get_throttles():
-            if not throttle.allow_request(request, self):
-                throttle_durations.append(throttle.wait())
-
-        if throttle_durations:
-            # Filter out `None` values which may happen in case of config / rate
-            # changes, see #1438
-            durations = [
-                duration for duration in throttle_durations
-                if duration is not None
-            ]
-
-            duration = max(durations, default=None)
-            self.throttled(request, duration)
-
-    def determine_version(self, request, *args, **kwargs):
-        """
-        If versioning is being used, then determine any API version for the
-        incoming request. Returns a two-tuple of (version, versioning_scheme)
-        """
-        if self.versioning_class is None:
-            return (None, None)
-        scheme = self.versioning_class()
-        return (scheme.determine_version(request, *args, **kwargs), scheme)
-
-    # Dispatch methods
-
-    def initialize_request(self, request, *args, **kwargs):
-        """
-        Returns the initial request object.
-        """
-        parser_context = self.get_parser_context(request)
-
-        return Request(
-            request,
-            parsers=self.get_parsers(),
-            authenticators=self.get_authenticators(),
-            negotiator=self.get_content_negotiator(),
-            parser_context=parser_context
-        )
-
-    def initial(self, request, *args, **kwargs):
-        """
-        Runs anything that needs to occur prior to calling the method handler.
-        """
-        self.format_kwarg = self.get_format_suffix(**kwargs)
-
-        # Perform content negotiation and store the accepted info on the request
-        neg = self.perform_content_negotiation(request)
-        request.accepted_renderer, request.accepted_media_type = neg
-
-        # Determine the API version, if versioning is in use.
-        version, scheme = self.determine_version(request, *args, **kwargs)
-        request.version, request.versioning_scheme = version, scheme
-
-        # Ensure that the incoming request is permitted
-        self.perform_authentication(request)
-        self.check_permissions(request)
-        self.check_throttles(request)
-
-    def finalize_response(self, request, response, *args, **kwargs):
-        """
-        Returns the final response object.
-        """
-        # Make the error obvious if a proper response is not returned
-        assert isinstance(response, HttpResponseBase), (
-            'Expected a `Response`, `HttpResponse` or `StreamingHttpResponse` '
-            'to be returned from the view, but received a `%s`'
-            % type(response)
-        )
-
-        if isinstance(response, Response):
-            if not getattr(request, 'accepted_renderer', None):
-                neg = self.perform_content_negotiation(request, force=True)
-                request.accepted_renderer, request.accepted_media_type = neg
-
-            response.accepted_renderer = request.accepted_renderer
-            response.accepted_media_type = request.accepted_media_type
-            response.renderer_context = self.get_renderer_context()
-
-        # Add new vary headers to the response instead of overwriting.
-        vary_headers = self.headers.pop('Vary', None)
-        if vary_headers is not None:
-            patch_vary_headers(response, cc_delim_re.split(vary_headers))
-
-        for key, value in self.headers.items():
-            response[key] = value
-
-        return response
-
-    def handle_exception(self, exc):
-        """
-        Handle any exception that occurs, by returning an appropriate response,
-        or re-raising the error.
-        """
-        if isinstance(exc, (exceptions.NotAuthenticated,
-                            exceptions.AuthenticationFailed)):
-            # WWW-Authenticate header for 401 responses, else coerce to 403
-            auth_header = self.get_authenticate_header(self.request)
-
-            if auth_header:
-                exc.auth_header = auth_header
-            else:
-                exc.status_code = status.HTTP_403_FORBIDDEN
-
-        exception_handler = self.get_exception_handler()
-
-        context = self.get_exception_handler_context()
-        response = exception_handler(exc, context)
-
-        if response is None:
-            self.raise_uncaught_exception(exc)
-
-        response.exception = True
-        return response
-
-    def raise_uncaught_exception(self, exc):
-        if settings.DEBUG:
-            request = self.request
-            renderer_format = getattr(request.accepted_renderer, 'format')
-            use_plaintext_traceback = renderer_format not in ('html', 'api', 'admin')
-            request.force_plaintext_errors(use_plaintext_traceback)
-        raise exc
-
-    # Note: Views are made CSRF exempt from within `as_view` as to prevent
-    # accidental removal of this exemption in cases where `dispatch` needs to
-    # be overridden.
+    @method_decorator(staff_member_required)
     def dispatch(self, request, *args, **kwargs):
-        """
-        `.dispatch()` is pretty much the same as Django's regular dispatch,
-        but with extra hooks for startup, finalize, and exception handling.
-        """
-        self.args = args
-        self.kwargs = kwargs
-        request = self.initialize_request(request, *args, **kwargs)
-        self.request = request
-        self.headers = self.default_response_headers  # deprecate?
+        if not utils.docutils_is_available:
+            # Display an error message for people without docutils
+            self.template_name = "admin_doc/missing_docutils.html"
+            return self.render_to_response(admin.site.each_context(request))
+        return super().dispatch(request, *args, **kwargs)
 
+    def get_context_data(self, **kwargs):
+        return super().get_context_data(
+            **{
+                **kwargs,
+                **admin.site.each_context(self.request),
+            }
+        )
+
+
+class BookmarkletsView(BaseAdminDocsView):
+    template_name = "admin_doc/bookmarklets.html"
+
+
+class TemplateTagIndexView(BaseAdminDocsView):
+    template_name = "admin_doc/template_tag_index.html"
+
+    def get_context_data(self, **kwargs):
+        tags = []
         try:
-            self.initial(request, *args, **kwargs)
+            engine = Engine.get_default()
+        except ImproperlyConfigured:
+            # Non-trivial TEMPLATES settings aren't supported (#24125).
+            pass
+        else:
+            app_libs = sorted(engine.template_libraries.items())
+            builtin_libs = [("", lib) for lib in engine.template_builtins]
+            for module_name, library in builtin_libs + app_libs:
+                for tag_name, tag_func in library.tags.items():
+                    title, body, metadata = utils.parse_docstring(tag_func.__doc__)
+                    title = title and utils.parse_rst(
+                        title, "tag", _("tag:") + tag_name
+                    )
+                    body = body and utils.parse_rst(body, "tag", _("tag:") + tag_name)
+                    for key in metadata:
+                        metadata[key] = utils.parse_rst(
+                            metadata[key], "tag", _("tag:") + tag_name
+                        )
+                    tag_library = module_name.split(".")[-1]
+                    tags.append(
+                        {
+                            "name": tag_name,
+                            "title": title,
+                            "body": body,
+                            "meta": metadata,
+                            "library": tag_library,
+                        }
+                    )
+        return super().get_context_data(**{**kwargs, "tags": tags})
 
-            # Get the appropriate handler method
-            if request.method.lower() in self.http_method_names:
-                handler = getattr(self, request.method.lower(),
-                                  self.http_method_not_allowed)
+
+class TemplateFilterIndexView(BaseAdminDocsView):
+    template_name = "admin_doc/template_filter_index.html"
+
+    def get_context_data(self, **kwargs):
+        filters = []
+        try:
+            engine = Engine.get_default()
+        except ImproperlyConfigured:
+            # Non-trivial TEMPLATES settings aren't supported (#24125).
+            pass
+        else:
+            app_libs = sorted(engine.template_libraries.items())
+            builtin_libs = [("", lib) for lib in engine.template_builtins]
+            for module_name, library in builtin_libs + app_libs:
+                for filter_name, filter_func in library.filters.items():
+                    title, body, metadata = utils.parse_docstring(filter_func.__doc__)
+                    title = title and utils.parse_rst(
+                        title, "filter", _("filter:") + filter_name
+                    )
+                    body = body and utils.parse_rst(
+                        body, "filter", _("filter:") + filter_name
+                    )
+                    for key in metadata:
+                        metadata[key] = utils.parse_rst(
+                            metadata[key], "filter", _("filter:") + filter_name
+                        )
+                    tag_library = module_name.split(".")[-1]
+                    filters.append(
+                        {
+                            "name": filter_name,
+                            "title": title,
+                            "body": body,
+                            "meta": metadata,
+                            "library": tag_library,
+                        }
+                    )
+        return super().get_context_data(**{**kwargs, "filters": filters})
+
+
+class ViewIndexView(BaseAdminDocsView):
+    template_name = "admin_doc/view_index.html"
+
+    def get_context_data(self, **kwargs):
+        views = []
+        url_resolver = get_resolver(get_urlconf())
+        try:
+            view_functions = extract_views_from_urlpatterns(url_resolver.url_patterns)
+        except ImproperlyConfigured:
+            view_functions = []
+        for func, regex, namespace, name in view_functions:
+            views.append(
+                {
+                    "full_name": get_view_name(func),
+                    "url": simplify_regex(regex),
+                    "url_name": ":".join((namespace or []) + (name and [name] or [])),
+                    "namespace": ":".join(namespace or []),
+                    "name": name,
+                }
+            )
+        return super().get_context_data(**{**kwargs, "views": views})
+
+
+class ViewDetailView(BaseAdminDocsView):
+    template_name = "admin_doc/view_detail.html"
+
+    @staticmethod
+    def _get_view_func(view):
+        urlconf = get_urlconf()
+        if get_resolver(urlconf)._is_callback(view):
+            mod, func = get_mod_func(view)
+            try:
+                # Separate the module and function, e.g.
+                # 'mymodule.views.myview' -> 'mymodule.views', 'myview').
+                return getattr(import_module(mod), func)
+            except ImportError:
+                # Import may fail because view contains a class name, e.g.
+                # 'mymodule.views.ViewContainer.my_view', so mod takes the form
+                # 'mymodule.views.ViewContainer'. Parse it again to separate
+                # the module and class.
+                mod, klass = get_mod_func(mod)
+                return getattr(getattr(import_module(mod), klass), func)
+
+    def get_context_data(self, **kwargs):
+        view = self.kwargs["view"]
+        view_func = self._get_view_func(view)
+        if view_func is None:
+            raise Http404
+        title, body, metadata = utils.parse_docstring(view_func.__doc__)
+        title = title and utils.parse_rst(title, "view", _("view:") + view)
+        body = body and utils.parse_rst(body, "view", _("view:") + view)
+        for key in metadata:
+            metadata[key] = utils.parse_rst(metadata[key], "model", _("view:") + view)
+        return super().get_context_data(
+            **{
+                **kwargs,
+                "name": view,
+                "summary": strip_p_tags(title),
+                "body": body,
+                "meta": metadata,
+            }
+        )
+
+
+def user_has_model_view_permission(user, opts):
+    """Based off ModelAdmin.has_view_permission."""
+    codename_view = get_permission_codename("view", opts)
+    codename_change = get_permission_codename("change", opts)
+    return user.has_perm("%s.%s" % (opts.app_label, codename_view)) or user.has_perm(
+        "%s.%s" % (opts.app_label, codename_change)
+    )
+
+
+class ModelIndexView(BaseAdminDocsView):
+    template_name = "admin_doc/model_index.html"
+
+    def get_context_data(self, **kwargs):
+        m_list = [
+            m._meta
+            for m in apps.get_models()
+            if user_has_model_view_permission(self.request.user, m._meta)
+        ]
+        return super().get_context_data(**{**kwargs, "models": m_list})
+
+
+class ModelDetailView(BaseAdminDocsView):
+    template_name = "admin_doc/model_detail.html"
+
+    def get_context_data(self, **kwargs):
+        model_name = self.kwargs["model_name"]
+        # Get the model class.
+        try:
+            app_config = apps.get_app_config(self.kwargs["app_label"])
+        except LookupError:
+            raise Http404(_("App %(app_label)r not found") % self.kwargs)
+        try:
+            model = app_config.get_model(model_name)
+        except LookupError:
+            raise Http404(
+                _("Model %(model_name)r not found in app %(app_label)r") % self.kwargs
+            )
+
+        opts = model._meta
+        if not user_has_model_view_permission(self.request.user, opts):
+            raise PermissionDenied
+
+        title, body, metadata = utils.parse_docstring(model.__doc__)
+        title = title and utils.parse_rst(title, "model", _("model:") + model_name)
+        body = body and utils.parse_rst(body, "model", _("model:") + model_name)
+
+        # Gather fields/field descriptions.
+        fields = []
+        for field in opts.fields:
+            # ForeignKey is a special case since the field will actually be a
+            # descriptor that returns the other object
+            if isinstance(field, models.ForeignKey):
+                data_type = field.remote_field.model.__name__
+                app_label = field.remote_field.model._meta.app_label
+                verbose = utils.parse_rst(
+                    (
+                        _("the related `%(app_label)s.%(data_type)s` object")
+                        % {
+                            "app_label": app_label,
+                            "data_type": data_type,
+                        }
+                    ),
+                    "model",
+                    _("model:") + data_type,
+                )
             else:
-                handler = self.http_method_not_allowed
+                data_type = get_readable_field_data_type(field)
+                verbose = field.verbose_name
+            fields.append(
+                {
+                    "name": field.name,
+                    "data_type": data_type,
+                    "verbose": verbose or "",
+                    "help_text": field.help_text,
+                }
+            )
 
-            response = handler(request, *args, **kwargs)
+        # Gather many-to-many fields.
+        for field in opts.many_to_many:
+            data_type = field.remote_field.model.__name__
+            app_label = field.remote_field.model._meta.app_label
+            verbose = _("related `%(app_label)s.%(object_name)s` objects") % {
+                "app_label": app_label,
+                "object_name": data_type,
+            }
+            fields.append(
+                {
+                    "name": "%s.all" % field.name,
+                    "data_type": "List",
+                    "verbose": utils.parse_rst(
+                        _("all %s") % verbose, "model", _("model:") + opts.model_name
+                    ),
+                }
+            )
+            fields.append(
+                {
+                    "name": "%s.count" % field.name,
+                    "data_type": "Integer",
+                    "verbose": utils.parse_rst(
+                        _("number of %s") % verbose,
+                        "model",
+                        _("model:") + opts.model_name,
+                    ),
+                }
+            )
 
-        except Exception as exc:
-            response = self.handle_exception(exc)
+        methods = []
+        # Gather model methods.
+        for func_name, func in model.__dict__.items():
+            if inspect.isfunction(func) or isinstance(
+                func, (cached_property, property)
+            ):
+                try:
+                    for exclude in MODEL_METHODS_EXCLUDE:
+                        if func_name.startswith(exclude):
+                            raise StopIteration
+                except StopIteration:
+                    continue
+                verbose = func.__doc__
+                verbose = verbose and (
+                    utils.parse_rst(
+                        cleandoc(verbose), "model", _("model:") + opts.model_name
+                    )
+                )
+                # Show properties, cached_properties, and methods without
+                # arguments as fields. Otherwise, show as a 'method with
+                # arguments'.
+                if isinstance(func, (cached_property, property)):
+                    fields.append(
+                        {
+                            "name": func_name,
+                            "data_type": get_return_data_type(func_name),
+                            "verbose": verbose or "",
+                        }
+                    )
+                elif (
+                    method_has_no_args(func)
+                    and not func_accepts_kwargs(func)
+                    and not func_accepts_var_args(func)
+                ):
+                    fields.append(
+                        {
+                            "name": func_name,
+                            "data_type": get_return_data_type(func_name),
+                            "verbose": verbose or "",
+                        }
+                    )
+                else:
+                    arguments = get_func_full_args(func)
+                    # Join arguments with ', ' and in case of default value,
+                    # join it with '='. Use repr() so that strings will be
+                    # correctly displayed.
+                    print_arguments = ", ".join(
+                        [
+                            "=".join([arg_el[0], *map(repr, arg_el[1:])])
+                            for arg_el in arguments
+                        ]
+                    )
+                    methods.append(
+                        {
+                            "name": func_name,
+                            "arguments": print_arguments,
+                            "verbose": verbose or "",
+                        }
+                    )
 
-        self.response = self.finalize_response(request, response, *args, **kwargs)
-        return self.response
+        # Gather related objects
+        for rel in opts.related_objects:
+            verbose = _("related `%(app_label)s.%(object_name)s` objects") % {
+                "app_label": rel.related_model._meta.app_label,
+                "object_name": rel.related_model._meta.object_name,
+            }
+            accessor = rel.accessor_name
+            fields.append(
+                {
+                    "name": "%s.all" % accessor,
+                    "data_type": "List",
+                    "verbose": utils.parse_rst(
+                        _("all %s") % verbose, "model", _("model:") + opts.model_name
+                    ),
+                }
+            )
+            fields.append(
+                {
+                    "name": "%s.count" % accessor,
+                    "data_type": "Integer",
+                    "verbose": utils.parse_rst(
+                        _("number of %s") % verbose,
+                        "model",
+                        _("model:") + opts.model_name,
+                    ),
+                }
+            )
+        return super().get_context_data(
+            **{
+                **kwargs,
+                "name": opts.label,
+                "summary": strip_p_tags(title),
+                "description": body,
+                "fields": fields,
+                "methods": methods,
+            }
+        )
 
-    def options(self, request, *args, **kwargs):
-        """
-        Handler method for HTTP 'OPTIONS' request.
-        """
-        if self.metadata_class is None:
-            return self.http_method_not_allowed(request, *args, **kwargs)
-        data = self.metadata_class().determine_metadata(request, self)
-        return Response(data, status=status.HTTP_200_OK)
+
+class TemplateDetailView(BaseAdminDocsView):
+    template_name = "admin_doc/template_detail.html"
+
+    def get_context_data(self, **kwargs):
+        template = self.kwargs["template"]
+        templates = []
+        try:
+            default_engine = Engine.get_default()
+        except ImproperlyConfigured:
+            # Non-trivial TEMPLATES settings aren't supported (#24125).
+            pass
+        else:
+            directories = list(default_engine.dirs)
+            for loader in default_engine.template_loaders:
+                if hasattr(loader, "get_dirs"):
+                    for dir_ in loader.get_dirs():
+                        if dir_ not in directories:
+                            directories.append(dir_)
+            for index, directory in enumerate(directories):
+                template_file = Path(safe_join(directory, template))
+                if template_file.exists():
+                    template_contents = template_file.read_text()
+                else:
+                    template_contents = ""
+                templates.append(
+                    {
+                        "file": template_file,
+                        "exists": template_file.exists(),
+                        "contents": template_contents,
+                        "order": index,
+                    }
+                )
+        return super().get_context_data(
+            **{
+                **kwargs,
+                "name": template,
+                "templates": templates,
+            }
+        )
+
+
+####################
+# Helper functions #
+####################
+
+
+def get_return_data_type(func_name):
+    """Return a somewhat-helpful data type given a function name"""
+    if func_name.startswith("get_"):
+        if func_name.endswith("_list"):
+            return "List"
+        elif func_name.endswith("_count"):
+            return "Integer"
+    return ""
+
+
+def get_readable_field_data_type(field):
+    """
+    Return the description for a given field type, if it exists. Fields'
+    descriptions can contain format strings, which will be interpolated with
+    the values of field.__dict__ before being output.
+    """
+    return field.description % field.__dict__
+
+
+def extract_views_from_urlpatterns(urlpatterns, base="", namespace=None):
+    """
+    Return a list of views from a list of urlpatterns.
+
+    Each object in the returned list is a 4-tuple:
+    (view_func, regex, namespace, name)
+    """
+    views = []
+    for p in urlpatterns:
+        if hasattr(p, "url_patterns"):
+            try:
+                patterns = p.url_patterns
+            except ImportError:
+                continue
+            views.extend(
+                extract_views_from_urlpatterns(
+                    patterns,
+                    base + str(p.pattern),
+                    (namespace or []) + (p.namespace and [p.namespace] or []),
+                )
+            )
+        elif hasattr(p, "callback"):
+            try:
+                views.append((p.callback, base + str(p.pattern), namespace, p.name))
+            except ViewDoesNotExist:
+                continue
+        else:
+            raise TypeError(_("%s does not appear to be a urlpattern object") % p)
+    return views
+
+
+def simplify_regex(pattern):
+    r"""
+    Clean up urlpattern regexes into something more readable by humans. For
+    example, turn "^(?P<sport_slug>\w+)/athletes/(?P<athlete_slug>\w+)/$"
+    into "/<sport_slug>/athletes/<athlete_slug>/".
+    """
+    pattern = remove_non_capturing_groups(pattern)
+    pattern = replace_named_groups(pattern)
+    pattern = replace_unnamed_groups(pattern)
+    pattern = replace_metacharacters(pattern)
+    if not pattern.startswith("/"):
+        pattern = "/" + pattern
+    return pattern
