@@ -3,13 +3,14 @@
 # Translators:
 # Jannis Leidel <jannis@leidel.info>, 2011
 # Marco Bonetti, 2014
+# Nicola Larosa <transifex@teknico.net>, 2013
 msgid ""
 msgstr ""
 "Project-Id-Version: django\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2015-01-17 11:07+0100\n"
 "PO-Revision-Date: 2017-09-23 18:54+0000\n"
-"Last-Translator: palmux <palmux@gmail.com>\n"
+"Last-Translator: Stefano Brentegani <sbrentegani@gmail.com>\n"
 "Language-Team: Italian (http://www.transifex.com/django/django/language/"
 "it/)\n"
 "MIME-Version: 1.0\n"
@@ -18,20 +19,20 @@ msgstr ""
 "Language: it\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
-msgid "Sessions"
-msgstr "Sessioni"
+msgid "Sites"
+msgstr "Siti"
 
-msgid "session key"
-msgstr "chiave di sessione"
+msgid "The domain name cannot contain any spaces or tabs."
+msgstr "Il nome di dominio non può contenere spazi né tab."
 
-msgid "session data"
-msgstr "dati di sessione"
+msgid "domain name"
+msgstr "nome di dominio"
 
-msgid "expire date"
-msgstr "data di scadenza"
+msgid "display name"
+msgstr "nome visualizzato"
 
-msgid "session"
-msgstr "sessione"
+msgid "site"
+msgstr "sito"
 
-msgid "sessions"
-msgstr "sessioni"
+msgid "sites"
+msgstr "siti"
