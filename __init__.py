@@ -1,13 +1,27 @@
-from __future__ import annotations
+r"""
+______ _____ _____ _____    __
+| ___ \  ___/  ___|_   _|  / _|                                           | |
+| |_/ / |__ \ `--.  | |   | |_ _ __ __ _ _ __ ___   _____      _____  _ __| |__
+|    /|  __| `--. \ | |   |  _| '__/ _` | '_ ` _ \ / _ \ \ /\ / / _ \| '__| |/ /
+| |\ \| |___/\__/ / | |   | | | | | (_| | | | | | |  __/\ V  V / (_) | |  |   <
+\_| \_\____/\____/  \_/   |_| |_|  \__,_|_| |_| |_|\___| \_/\_/ \___/|_|  |_|\_|
+"""
 
-__version__ = "25.2"
+__title__ = 'Django REST framework'
+__version__ = '3.16.1'
+__author__ = 'Tom Christie'
+__license__ = 'BSD 3-Clause'
+__copyright__ = 'Copyright 2011-2023 Encode OSS Ltd'
+
+# Version synonym
+VERSION = __version__
+
+# Header encoding (see RFC5987)
+HTTP_HEADER_ENCODING = 'iso-8859-1'
+
+# Default datetime input and output formats
+ISO_8601 = 'iso-8601'
 
 
-def main(args: list[str] | None = None) -> int:
-    """This is an internal API only meant for use by pip's own console scripts.
-
-    For additional details, see https://github.com/pypa/pip/issues/7498.
-    """
-    from pip._internal.utils.entrypoints import _wrapper
-
-    return _wrapper(args)
+class RemovedInDRF317Warning(PendingDeprecationWarning):
+    pass
