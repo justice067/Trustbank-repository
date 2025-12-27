@@ -1,6 +1,7 @@
 # This file is distributed under the same license as the Django package.
 #
 # Translators:
+# Ander Martínez <ander.basaundi@gmail.com>, 2013
 # Eneko Illarramendi <eneko@illarra.com>, 2017
 # Jannis Leidel <jannis@leidel.info>, 2011
 msgid ""
@@ -17,20 +18,20 @@ msgstr ""
 "Language: eu\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
-msgid "Sessions"
-msgstr "Sesioak"
+msgid "Sites"
+msgstr "Webguneak"
 
-msgid "session key"
-msgstr "sesioaren giltza"
+msgid "The domain name cannot contain any spaces or tabs."
+msgstr "Domeinu izenak ezin du zuriunerik edo tabuladorerik eduki."
 
-msgid "session data"
-msgstr "sesioaren datuak"
+msgid "domain name"
+msgstr "domeinu-izena"
 
-msgid "expire date"
-msgstr "amaiera data"
+msgid "display name"
+msgstr "erakusteko izena"
 
-msgid "session"
-msgstr "sesioa"
+msgid "site"
+msgstr "webgunea"
 
-msgid "sessions"
-msgstr "sesioak"
+msgid "sites"
+msgstr "webguneak"

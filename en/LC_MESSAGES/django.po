@@ -13,26 +13,26 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-#: contrib/sessions/apps.py:8
-msgid "Sessions"
+#: contrib/sites/apps.py:11
+msgid "Sites"
 msgstr ""
 
-#: contrib/sessions/models.py:44
-msgid "session key"
+#: contrib/sites/models.py:30
+msgid "The domain name cannot contain any spaces or tabs."
 msgstr ""
 
-#: contrib/sessions/models.py:46
-msgid "session data"
+#: contrib/sites/models.py:81
+msgid "domain name"
 msgstr ""
 
-#: contrib/sessions/models.py:47
-msgid "expire date"
+#: contrib/sites/models.py:83
+msgid "display name"
 msgstr ""
 
-#: contrib/sessions/models.py:52
-msgid "session"
+#: contrib/sites/models.py:88
+msgid "site"
 msgstr ""
 
-#: contrib/sessions/models.py:53
-msgid "sessions"
+#: contrib/sites/models.py:89
+msgid "sites"
 msgstr ""
